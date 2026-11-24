@@ -40,6 +40,9 @@ class Switch2VulkanContext
     void destroyBuffer(Switch2VkBuffer& buffer);
     void setFrameDriven(bool enabled);
     void videoFrameChanged(bool changed) { newVideoFrame |= changed; }
+    // steady_clock ns when a queued video frame becomes due (0: none). A frame-driven
+    // loop that skips presenting wakes by then instead of waiting for the next arrival.
+    void setVideoDeadline(uint64_t ns) { videoDeadline = ns; }
     void videoSource(bool direct, bool texel);
     void wakeFrame();
     void retain(std::shared_ptr<void> resource);
@@ -95,10 +98,14 @@ class Switch2VulkanContext
     uint32_t maxTexelElements = 0;
     FramePresentation presentation;
     uint64_t statsStart = 0, presents = 0, newFrames = 0, repeats = 0, skipped = 0;
+    // Time begin() blocks on the frame fence and swapchain acquire: display back-pressure.
+    uint64_t waitTotalNs = 0, waitMaxNs = 0, waitCount = 0, waitsOver4ms = 0;
+    uint16_t intervalNum = 0, intervalDen = 0;
     uint64_t directPresents = 0, copyPresents = 0, texelPresents = 0, storagePresents = 0;
     std::mutex wakeMutex;
     std::condition_variable frameReady;
     uint64_t wakeGeneration = 0, observedGeneration = 0;
+    uint64_t videoDeadline = 0;
 };
 } // namespace brls
 #endif

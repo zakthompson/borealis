@@ -319,8 +319,18 @@ void Switch2VulkanContext::reportPresentation(uint64_t now)
     if (elapsed < 1000000000)
         return;
     videoFPS = float(newFrames) * 1000000000.0f / elapsed;
-    brls::Logger::info("SWITCH2_VULKAN_PRESENT: presents={} newVideo={} repeatedVideo={} directBuffer={} copyBuffer={} texel={} storage={} skipped={} uniqueFPS={:.1f} frameDriven={}",
-        presents, newFrames, repeats, directPresents, copyPresents, texelPresents, storagePresents, skipped, videoFPS, presentation.isFrameDriven());
+    u16 num = 0, den = 0;
+    nwindowGetPresentInterval(nwindowGetDefault(), &num, &den);
+    if (num != intervalNum || den != intervalDen)
+    {
+        intervalNum = num;
+        intervalDen = den;
+        brls::Logger::info("SWITCH2_VULKAN_PRESENT: present interval {}/{} s", num, den);
+    }
+    brls::Logger::info("SWITCH2_VULKAN_PRESENT: presents={} newVideo={} repeatedVideo={} directBuffer={} copyBuffer={} texel={} storage={} skipped={} uniqueFPS={:.1f} frameDriven={} acquireWaitAvgMs={:.2f} acquireWaitMaxMs={:.2f} acquireWaits4ms={}",
+        presents, newFrames, repeats, directPresents, copyPresents, texelPresents, storagePresents, skipped, videoFPS, presentation.isFrameDriven(),
+        waitCount ? double(waitTotalNs) / waitCount / 1e6 : 0.0, waitMaxNs / 1e6, waitsOver4ms);
+    waitTotalNs = waitMaxNs = waitCount = waitsOver4ms = 0;
     presents = newFrames = repeats = skipped = 0;
     directPresents = copyPresents = texelPresents = storagePresents = 0;
     statsStart                                                      = now;
@@ -492,11 +502,14 @@ void Switch2VulkanContext::begin()
         observedGeneration = wakeGeneration;
     }
     videoDrawn = newVideoFrame = directVideo = texelVideo = false;
+    videoDeadline = 0;
     u32 w = extent.width, h = extent.height;
     nwindowGetDimensions(nwindowGetDefault(), &w, &h);
     if (resizePending || w != extent.width || h != extent.height)
         recreate();
-    auto& flight = flights[frameIndex];
+    auto& flight              = flights[frameIndex];
+    const auto waitStart      = std::chrono::steady_clock::now();
+    const bool acquirePending = !imageAcquired;
     check(vkWaitForFences(device, 1, &flight.fence, VK_TRUE, UINT64_MAX), "frame completion");
     release(flight);
     if (!imageAcquired)
@@ -512,6 +525,16 @@ void Switch2VulkanContext::begin()
         else
             check(rc, "acquire");
         imageAcquired = true;
+    }
+    if (acquirePending)
+    {
+        const uint64_t waited = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - waitStart)
+                                    .count();
+        waitTotalNs += waited;
+        waitMaxNs = std::max(waitMaxNs, waited);
+        waitsOver4ms += waited >= 4000000;
+        ++waitCount;
     }
     check(vkResetCommandBuffer(command(), 0), "reset commands");
     VkCommandBufferBeginInfo begin { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
@@ -566,8 +589,11 @@ void Switch2VulkanContext::end()
         // The next begin resets these unsubmitted commands only after its fence.
         ++skipped;
         reportPresentation(now);
+        uint64_t waitNs = presentation.waitNs(now);
+        if (videoDeadline)
+            waitNs = std::min<uint64_t>(waitNs, videoDeadline > now ? videoDeadline - now : 0);
         std::unique_lock<std::mutex> lock(wakeMutex);
-        frameReady.wait_for(lock, std::chrono::nanoseconds(presentation.waitNs(now)),
+        frameReady.wait_for(lock, std::chrono::nanoseconds(waitNs),
             [this]
             { return wakeGeneration != observedGeneration; });
         return;
@@ -601,6 +627,8 @@ void Switch2VulkanContext::end()
     ++presents;
     if (videoDrawn)
     {
+        if (newVideoFrame)
+            presentation.videoPresented(now);
         newFrames += newVideoFrame;
         repeats += !newVideoFrame;
         directPresents += directVideo;
