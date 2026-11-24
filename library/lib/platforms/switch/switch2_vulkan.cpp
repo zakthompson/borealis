@@ -583,7 +583,7 @@ void Switch2VulkanContext::end()
     const uint64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch())
                              .count();
-    if (!presentation.shouldPresent(videoDrawn, newVideoFrame, resizePending, now))
+    if (!presentation.shouldPresent(videoDrawn, newVideoFrame, resizePending, now, videoDeadline))
     {
         // Keep the acquired image and its signaled semaphore until a real submit.
         // The next begin resets these unsubmitted commands only after its fence.
